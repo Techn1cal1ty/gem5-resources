@@ -3,7 +3,6 @@
  * Copyright © 2014 Advanced Micro Devices, Inc.                                    *
  * Copyright (c) 2015 Mark D. Hill and David A. Wood                                *
  * Copyright (c) 2021 Gaurav Jain and Matthew D. Sinclair                           *
- * Copyright (c) 2023 James Braun and Matthew D. Sinclair                           *
  * All rights reserved.                                                             *
  *                                                                                  *
  * Redistribution and use in source and binary forms, with or without               *
@@ -39,7 +38,7 @@
  *                                                                                  *
  * If you use the software (in whole or in part), you shall adhere to all           *
  * applicable U.S., European, and other export laws, including but not limited to   *
- * the U.S. Export Administration Regulations ("EAR"�) (15 C.F.R Sections 730-774), *
+ * the U.S. Export Administration Regulations ("EAR"�) (15 C.F.R Sections 730-774),  *
  * and E.U. Council Regulation (EC) No 428/2009 of 5 May 2009.  Further, pursuant   *
  * to Section 740.6 of the EAR, you hereby certify that, except pursuant to a       *
  * license granted by the United States Department of Commerce Bureau of Industry   *
@@ -66,17 +65,16 @@
 #include "../graph_parser/util.h"
 #include "kernel.h"
 #include "parse.h"
-#include <sys/mman.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <fstream>
-#include <iostream>
-#include <stdint.h>
 
 #ifdef GEM5_FUSION
+#include <stdint.h>
 #include <gem5/m5ops.h>
+#endif
+
+#ifdef GEM5_FUSION
 #define MAX_ITERS 192
 #else
+#include <stdint.h>
 #define MAX_ITERS INT32_MAX
 #endif
 
@@ -86,84 +84,82 @@
 
 int main(int argc, char **argv)
 {
-	char *tmpchar;
-	bool create_mmap = false;
-	bool use_mmap = false;
+    char *tmpchar;
+    bool create_mmap = false;
+    bool use_mmap = false;
     bool verify_results = false;
 
     int dim;
     int num_edges;
-	int * distmatrix = NULL;
-	int * result = NULL;	
+    int * distmatrix = NULL;
+    int * result = NULL;
 
     hipError_t err = hipSuccess;
     // Get program input
     if (argc >= 3) {
-		tmpchar = argv[1];  // Graph input file
+        tmpchar = argv[1];  // Graph input file
         if (atoi(argv[2]) == 1) {
-			create_mmap = true;
-		} else if (atoi(argv[2]) == 2) {
-			use_mmap = true;
-		}
+            create_mmap = true;
+        } else if (atoi(argv[2]) == 2) {
+            use_mmap = true;
+        }
         if (atoi(argv[2]) < 0 || atoi(argv[2]) > 2) { // Invalid parameters
-			fprintf(stderr, "You did something wrong!\n");
-			exit(1);
-		}
-	} else {
+            fprintf(stderr, "You did something wrong!\n");
+            exit(1);
+        }
+    } else {
         fprintf(stderr, "You did something wrong!\n");
         exit(1);
-	}
-	if (argc >= 4) {
+    }
+    if (argc >= 4) {
         if (atoi(argv[3]) == 1) {
             verify_results = true;
         } else if (atoi(argv[3]) != 0) {
-			fprintf(stderr, "You did something wrong!\n");
-			exit(1);
+            fprintf(stderr, "You did something wrong!\n");
+            exit(1);
         }
-        }
-		}
     }
-	if (argc >= 5) {
-		fprintf(stderr, "WARNING: Ignoring extra parameters: ");
-		for (int i = 4; i < argc; i++)
-			fprintf(stderr, "%s ", argv[i]);
-		fprintf(stderr, "!\n");
-	}
+    if (argc >= 5) {
+        fprintf(stderr, "WARNING: Ignoring extra parameters: ");
+        for (int i = 4; i < argc; i++)
+            fprintf(stderr, "%s ", argv[i]);
+        fprintf(stderr, "!\n");
+    }
     if (use_mmap) {
         printf("Using an mmap!\n");
-	
-		// Get # of nodes
-		int fd = open("mmap.bin", std::ios::binary | std::fstream::in);
-		int offset = 0;
+    
+        // Get # of nodes
+        int fd = open("mmap.bin", std::ios::binary | std::fstream::in);
+        int offset = 0;
         dim = *((int *)mmap(NULL, 1 * sizeof(int), PROT_READ, MAP_PRIVATE, fd, offset)); 
-		
-		// Read distmatrix in
+        
+        // Read distmatrix in
         int *distmatrixmap = (int *)mmap(NULL, (dim * dim + 1) * sizeof(int), PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, offset);
-		
-		// Check that mmaping was successful
-		if (distmatrixmap == MAP_FAILED) fprintf(stderr, "mmap failed\n");
+        
+        // Check that mmaping was successful
+        if (distmatrixmap == MAP_FAILED) fprintf(stderr, "mmap failed\n");
 
-		// move everything to array from index 1
+        // move everything to array from index 1
         distmatrix = (int *)malloc(dim * dim * sizeof(int));
-		memcpy(distmatrix, &distmatrixmap[1], dim * dim * sizeof(int));
+        memcpy(distmatrix, &distmatrixmap[1], dim * dim * sizeof(int));
 
-		// free mmap, close file
-		munmap(distmatrixmap, (dim * dim + 1) * sizeof(int));
-		close(fd);
+        // free mmap, close file
+        munmap(distmatrixmap, (dim * dim + 1) * sizeof(int));
+        close(fd);
 
-	} else { 
-		// Parse the adjacency matrix
+    } else { 
+        // Parse the adjacency matrix
         int *adjmatrix = parse_graph_file(&dim, &num_edges, tmpchar);
         
-		// Initialize the distance matrix
-		distmatrix = (int *)malloc(dim * dim * sizeof(int));
-		if (!distmatrix) fprintf(stderr, "malloc failed - distmatrix\n");
+        // Initialize the distance matrix
+        distmatrix = (int *)malloc(dim * dim * sizeof(int));
+        if (!distmatrix) fprintf(stderr, "malloc failed - distmatrix\n");
 
         // TODO: Now only supports integer weights
         // Setup the input matrix
-		for (int i = 0 ; i < dim; i++) {
+        for (int i = 0 ; i < dim; i++) {
             for (int j = 0 ; j < dim; j++) {
-				if (i == j) {
+                if (i == j) {
                     // Diagonal
                     distmatrix[i * dim + j] = 0;
                 } else if (adjmatrix[i * dim + j] == -1) {
@@ -174,26 +170,26 @@ int main(int argc, char **argv)
                     distmatrix[i * dim + j] = adjmatrix[i * dim + j];
                 }
             }
-		}
-        if (create_mmap) { 
-			printf("creating an mmap\n");
-			
-			// Prints distmatrix to file
-			std::ofstream fout("mmap.bin", std::ios::binary);
-            fout.write((char *)&dim, sizeof(int));
-			fout.write((char *)distmatrix, dim * dim * sizeof(int));
-			
-			free(distmatrix);
-			free(adjmatrix);
-			fout.close();
-			printf("mmap.bin created!\n");
-			return 0;
         }
-		free(adjmatrix);
-    }	
-	
-	// Initialize the result matrix
-	result = (int *)malloc(dim * dim * sizeof(int));
+        if (create_mmap) { 
+            printf("creating an mmap\n");
+            
+            // Prints distmatrix to file
+            std::ofstream fout("mmap.bin", std::ios::binary);
+            fout.write((char *)&dim, sizeof(int));
+            fout.write((char *)distmatrix, dim * dim * sizeof(int));
+            
+            free(distmatrix);
+            free(adjmatrix);
+            fout.close();
+            printf("mmap.bin created!\n");
+            return 0;
+        }
+        free(adjmatrix);
+    }    
+    
+    // Initialize the result matrix
+    result = (int *)malloc(dim * dim * sizeof(int));
     if (!result) fprintf(stderr, "malloc failed - result\n");
 
     int *dist_d;
@@ -216,18 +212,18 @@ int main(int argc, char **argv)
 #ifdef GEM5_FUSION
     m5_work_begin(0, 0);
 #endif
-	
+    
     // Copy the dist matrix to the device
-	err = hipMemcpy(dist_d, distmatrix, dim * dim * sizeof(int), hipMemcpyHostToDevice);
-	if (err != hipSuccess) {
-	    fprintf(stderr, "ERROR: hipMemcpy feature_d (size:%d) => %d\n", dim * dim, err);
-		return -1;
-	} 
+    err = hipMemcpy(dist_d, distmatrix, dim * dim * sizeof(int), hipMemcpyHostToDevice);
+    if (err != hipSuccess) {
+        fprintf(stderr, "ERROR: hipMemcpy feature_d (size:%d) => %d\n", dim * dim, err);
+        return -1;
+    } 
 
-	// Work dimension
+    // Work dimension
     dim3 threads(16, 16, 1);
     dim3 grid(dim / 16, dim / 16, 1);
-	
+    
     //double timer3 = gettime();
     // Main computation loop
     for (int k = 1; k < dim && k < MAX_ITERS; k++) {
@@ -255,11 +251,11 @@ int main(int argc, char **argv)
         // Below is the verification part
         // Calculate on the CPU
         int *dist = distmatrix;
-		for (int k = 1; k < dim && k < MAX_ITERS; k++) {
+        for (int k = 1; k < dim && k < MAX_ITERS; k++) {
             for (int i = 0; i < dim; i++) {
                 for (int j = 0; j < dim; j++) {
-					if (dist[i * dim + k] + dist[k * dim + j] < dist[i * dim + j]) {
-						dist[i * dim + j] = dist[i * dim + k] + dist[k * dim + j];
+                    if (dist[i * dim + k] + dist[k * dim + j] < dist[i * dim + j]) {
+                        dist[i * dim + j] = dist[i * dim + k] + dist[k * dim + j];
                     }
                 }
             }
@@ -270,13 +266,11 @@ int main(int argc, char **argv)
         for (int i = 0; i < dim; i++) {
             for (int j = 0; j < dim; j++) {
                 if (dist[i * dim + j] !=  result[i * dim + j]) {
-                    fprintf(stderr, "mismatch at (%d, %d). Expected %d but was %d\n", i, j, dist[i * dim + j], result[i * dim + j]);
-                    printf("mismatch at (%d, %d). Expected %d but was %d\n", i, j, dist[i * dim + j], result[i * dim + j]);
-					check_flag = 1;
+                    fprintf(stderr, "mismatch at (%d, %d)\n", i, j);
+                    check_flag = 1;
                 }
             }
         }
-
         // If there is mismatch, report
         if (check_flag) {
             fprintf(stdout, "WARNING: Produced incorrect results!\n");
@@ -287,14 +281,13 @@ int main(int argc, char **argv)
 
     printf("Finishing Floyd-Warshall\n");
 
-
     // Free host-side buffers
-	free(distmatrix);
-	free(result);
-    
-	// Free CUDA buffers
-	hipFree(dist_d);
-	hipFree(next_d);
-    
-	return 0;
+    free(result);
+    free(distmatrix);
+
+    // Free CUDA buffers
+    hipFree(dist_d);
+    hipFree(next_d);
+
+    return 0;
 }

@@ -3,6 +3,7 @@
  * Copyright � 2014 Advanced Micro Devices, Inc.                                    *
  * Copyright (c) 2015 Mark D. Hill and David A. Wood                                *
  * Copyright (c) 2021 Gaurav Jain and Matthew D. Sinclair                           *
+ * Copyright (c) 2024 James Braun and Matthew D. Sinclair                           *
  * All rights reserved.                                                             *
  *                                                                                  *
  * Redistribution and use in source and binary forms, with or without               *
@@ -65,6 +66,12 @@
 #include "BC.h"
 #include "../graph_parser/util.h"
 #include "kernel.h"
+#include <unistd.h>
+#include <sys/mman.h>
+#include <fstream>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #ifdef GEM5_FUSION
 #include <stdint.h>
@@ -83,23 +90,226 @@ void print_vectorf(float *vector, int num);
 
 int main(int argc, char **argv)
 {
-    char *tmpchar;
+    char *tmpchar = NULL;
+    bool mode_set = false;
+    bool create_mmap = false;
+    bool use_mmap = false;
+    bool directed = 1;
 
     int num_nodes;
     int num_edges;
-    bool directed = 1;
 
+    int opt;
     hipError_t err;
 
-    if (argc == 2) {
-        tmpchar     = argv[1];       //graph inputfile
-    } else {
-        fprintf(stderr, "You did something wrong!\n");
+    // Input arguments
+    while ((opt = getopt(argc, argv, "f:hm:")) != -1) {
+        switch (opt) {
+        case 'f': // Input file name
+            tmpchar = optarg;
+            break;
+        case 'h': // Help
+            fprintf(stderr, "SWITCHES\n");
+            fprintf(stderr, "\t-f [file name]\n");
+            fprintf(stderr, "\t\tinput file name\n");
+            fprintf(stderr, "\t-m [mode]\n");
+            fprintf(stderr, "\t\toperation mode: default (run without mmap), generate, usemmap\n");
+            exit(0);
+        case 'm':  // Mode
+            if (strcmp(optarg, "default") == 0 || optarg[0] == '0') {
+                mode_set = true;
+            } else if (strcmp(optarg, "generate") == 0 || optarg[0] == '1') {
+                create_mmap = true;
+            } else if (strcmp(optarg, "usemmap") == 0 || optarg[0] == '2') {
+                use_mmap = true;
+            } else {
+                fprintf(stderr, "Unrecognized mode: %s\n", optarg);
+                exit(1);
+            }
+            break;
+        default:
+            fprintf(stderr, "Unrecognized switch: -%c\n", opt);
+            exit(1);
+        }
+    }
+
+    if (!(mode_set || create_mmap || use_mmap)) {
+        fprintf(stderr, "Execution mode not specified! Use -h for help\n");
+        exit(1);
+    } else if (use_mmap && tmpchar != NULL) {
+        fprintf(stdout, "Ignoring input file specifiers\n");
+    } else if ((mode_set || create_mmap) && tmpchar == NULL) {
+        fprintf(stderr, "Input file not specified! Use -h for help\n");
         exit(1);
     }
 
-    // Parse graph and store it in a CSR format
-    csr_array *csr = parseCOO(tmpchar, &num_nodes, &num_edges, directed);
+    csr_array *csr;
+
+    if (use_mmap) {
+        printf("Using an mmap!\n");
+
+        // get num_nodes
+        int fd = open("row_mmap.bin", std::ios::binary | std::fstream::in);
+        if (fd == -1) {
+            fprintf(stderr, "error: %s\n", strerror(errno));
+            fprintf(stderr, "You need to create an mmapped input file! row_mmap.bin is missing!\n");
+            exit(1);
+        }
+
+        int offset = 0;
+        num_nodes = *((int *)mmap(NULL, 1 * sizeof(int), PROT_READ, MAP_PRIVATE, fd, offset));
+
+        // read row_array in
+        int *row_array_map = (int *)mmap(NULL, (num_nodes + 2) * sizeof(int), PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, offset);
+
+        // Check that maping was sucessful
+        if (row_array_map == MAP_FAILED) {
+            fprintf(stderr, "row mmap failed!\n");
+            exit(1);
+        }
+
+        // Copy row_array
+        csr = (csr_array *)malloc(sizeof(csr_array));
+        if (csr == NULL) {
+            printf("csr_array malloc failed!\n");
+            exit(1);
+        }
+
+        int *row_array = (int *)malloc((num_nodes + 1) * sizeof(int));
+        memcpy(row_array, &row_array_map[1], (num_nodes + 1) * sizeof(int));
+
+        munmap(row_array_map, (num_nodes + 2) * sizeof(int));
+        close(fd);
+
+        // get num_edges
+        fd = open("col_mmap.bin", std::ios::binary | std::fstream::in);
+        if (fd == -1) {
+            fprintf(stderr, "error: %s\n", strerror(errno));
+            fprintf(stderr, "You need to create an mmapped input file! col_mmap.bin is missing!\n");
+            exit(1);
+        }
+
+        offset = 0;
+        num_edges = *((int *)mmap(NULL, 1 * sizeof(int), PROT_READ, MAP_PRIVATE, fd, offset));
+
+        // read row_array in
+        int *col_array_map = (int *)mmap(NULL, (num_edges + 1) * sizeof(int), PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, offset);
+
+        // Check that maping was sucessful
+        if (col_array_map == MAP_FAILED) {
+            fprintf(stderr, "col mmap failed!\n");
+            exit(1);
+        }
+
+        // Copy col_array
+        int *col_array = (int *)malloc(num_edges * sizeof(int));
+        memcpy(col_array, &col_array_map[1], num_edges * sizeof(int));
+
+        munmap(col_array_map, (num_edges + 1) * sizeof(int));
+        close(fd);
+
+        fd = open("row_t_mmap.bin", std::ios::binary | std::fstream::in);
+        if (fd == -1) {
+            fprintf(stderr, "error: %s\n", strerror(errno));
+            fprintf(stderr, "You need to create an mmapped input file! row_t_mmap.bin is missing!\n");
+            exit(1);
+        }
+
+        offset = 0;
+
+        // read row_t_array in
+        int *row_array_t_map = (int *)mmap(NULL, (num_nodes + 1) * sizeof(int), PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, offset);
+
+        // Check that maping was sucessful
+        if (row_array_t_map == MAP_FAILED) {
+            fprintf(stderr, "row_t mmap failed!\n");
+            exit(1);
+        }
+
+        // Copy row_t_array        
+        int *row_array_t = (int *)malloc((num_nodes + 1) * sizeof(int));
+        memcpy(row_array_t, row_array_t_map, (num_nodes + 1) * sizeof(int));
+
+        munmap(row_array_t_map, (num_nodes + 1) * sizeof(int));
+        close(fd);
+
+        fd = open("col_t_mmap.bin", std::ios::binary | std::fstream::in);
+        if (fd == -1) {
+            fprintf(stderr, "error: %s\n", strerror(errno));
+            fprintf(stderr, "You need to create an mmapped input file! col_t_mmap.bin is missing!\n");
+            exit(1);
+        }
+
+        offset = 0;
+
+        // read col_t_array in
+        int *col_array_t_map = (int *)mmap(NULL, num_edges * sizeof(int), PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, offset);
+
+        // Check that maping was sucessful
+        if (col_array_t_map == MAP_FAILED) {
+            fprintf(stderr, "col_t mmap failed!\n");
+            exit(1);
+        }
+
+        // Copy col_t_array
+        int *col_array_t = (int *)malloc(num_edges * sizeof(int));
+        memcpy(col_array_t, col_array_t_map, num_edges * sizeof(int));
+
+        munmap(col_array_t_map, num_edges * sizeof(int));
+        close(fd);
+        
+        memset(csr, 0, sizeof(csr_array));
+        csr->row_array = row_array;
+        csr->col_array = col_array;
+        csr->row_array_t = row_array_t;
+        csr->col_array_t = col_array_t;
+        
+        close(fd);
+    } else {
+        // Parse graph and store it in a CSR format
+        csr = parseCOO(tmpchar, &num_nodes, &num_edges, directed);
+
+        if (create_mmap) {
+            printf("creating an mmap\n");
+
+            // prints csr to file
+            std::ofstream row_out("row_mmap.bin", std::ios::binary);
+
+            row_out.write((char *)&num_nodes, sizeof(int));
+            row_out.write((char *)csr->row_array, (num_nodes + 1) * sizeof(int));
+
+            row_out.close();
+
+            std::ofstream col_out("col_mmap.bin", std::ios::binary);
+
+            col_out.write((char *)&num_edges, sizeof(int));
+            col_out.write((char *)csr->col_array, num_edges * sizeof(int));
+
+            col_out.close();
+
+            std::ofstream row_t_out("row_t_mmap.bin", std::ios::binary);
+
+            row_t_out.write((char *)csr->row_array_t, (num_nodes + 1) * sizeof(int));
+
+            row_t_out.close();
+
+            std::ofstream col_t_out("col_t_mmap.bin", std::ios::binary);
+
+            col_t_out.write((char *)csr->col_array_t, num_edges * sizeof(int));
+
+            col_t_out.close();
+            
+            free(csr->row_array);
+            free(csr->col_array);
+            free(csr->data_array);
+            free(csr->row_array_t);
+            free(csr->col_array_t);
+            free(csr->data_array_t);
+            free(csr);
+            printf("mmaps created!\n");
+            return 0;
+        }
+    }
 
     // Allocate the bc host array
     float *bc_h = (float *)malloc(num_nodes * sizeof(float));

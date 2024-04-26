@@ -3,6 +3,7 @@
  * Copyright © 2014 Advanced Micro Devices, Inc.                                    *
  * Copyright (c) 2015 Mark D. Hill and David A. Wood                                *
  * Copyright (c) 2021 Gaurav Jain and Matthew D. Sinclair                           *
+ * Copyright (c) 2024 James Braun and Matthew D. Sinclair                           *
  * All rights reserved.                                                             *
  *                                                                                  *
  * Redistribution and use in source and binary forms, with or without               *
@@ -64,6 +65,13 @@
 #include "../graph_parser/parse.h"
 #include "../graph_parser/util.h"
 #include "kernel_max.h"
+#include <unistd.h>
+#include <sys/mman.h>
+#include <fstream>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include "coloring_parse.h"
 
 #ifdef GEM5_FUSION
 #include <stdint.h>
@@ -76,20 +84,78 @@ void print_vector(int *vector, int num);
 
 int main(int argc, char **argv)
 {
-    char *tmpchar;
+    char *tmpchar = NULL;
+    bool mode_set = false;
+    bool create_mmap = false;
+    bool use_mmap = false;
 
     int num_nodes;
     int num_edges;
     int file_format = 1;
     bool directed = 0;
 
+    int opt;
     hipError_t err = hipSuccess;
 
-    if (argc == 3) {
-        tmpchar = argv[1];  //graph inputfile
-        file_format = atoi(argv[2]); //graph format
-    } else {
-        fprintf(stderr, "You did something wrong!\n");
+    // Input arguments
+    while ((opt = getopt(argc, argv, "df:hm:t:")) != -1) {
+        switch (opt) {
+        case 'd': // Directed graph
+            directed = 1;
+        case 'f': // Input file name
+            tmpchar = optarg;
+            break;
+        case 'h': // Help
+            fprintf(stderr, "SWITCHES\n");
+            fprintf(stderr, "\t-d\n");
+            fprintf(stderr, "\t\tdirected graph (default is not directed)\n");
+            fprintf(stderr, "\t-f [file name]\n");
+            fprintf(stderr, "\t\tinput file name\n");
+            fprintf(stderr, "\t-m [mode]\n");
+            fprintf(stderr, "\t\toperation mode: default (run without mmap), generate, usemmap\n");
+            fprintf(stderr, "\t-t [file type] \n");
+            fprintf(stderr, "\t\tfile type (not required when running in usemmap mode): dimacs9 (0), metis (1), matrixmarket (2)\n");
+            exit(0);
+        case 'm':  // Mode
+            if (strcmp(optarg, "default") == 0 || optarg[0] == '0') {
+                mode_set = true;
+            } else if (strcmp(optarg, "generate") == 0 || optarg[0] == '1') {
+                create_mmap = true;
+            } else if (strcmp(optarg, "usemmap") == 0 || optarg[0] == '2') {
+                use_mmap = true;
+            } else {
+                fprintf(stderr, "Unrecognized mode: %s\n", optarg);
+                exit(1);
+            }
+            break;
+        case 't':  // Input file type
+            if (strcmp(optarg, "dimacs9") == 0 || optarg[0] == '0') {
+                file_format = 0;
+            } else if (strcmp(optarg, "metis") == 0 || optarg[0] == '1') {
+                file_format = 1;
+            } else if (strcmp(optarg, "matrixmarket") == 0 || optarg[0] == '2') {
+                file_format = 2;
+            } else {
+                fprintf(stderr, "Unrecognized file type: %s\n", optarg);
+                exit(1);
+            }
+            break;
+        default:
+            fprintf(stderr, "Unrecognized switch: -%c\n", opt);
+            exit(1);
+        }
+    }
+
+    if (!(mode_set || create_mmap || use_mmap)) {
+        fprintf(stderr, "Execution mode not specified! Use -h for help\n");
+        exit(1);
+    } else if (use_mmap && (tmpchar != NULL || file_format != -1)) {
+        fprintf(stdout, "Ignoring input file specifiers\n");
+    } else if ((mode_set || create_mmap) && tmpchar == NULL) {
+        fprintf(stderr, "Input file not specified! Use -h for help\n");
+        exit(1);
+    } else if ((mode_set || create_mmap) && file_format == -1) {
+        fprintf(stderr, "Input file type not specified! Use -h for help\n");
         exit(1);
     }
 
@@ -97,29 +163,40 @@ int main(int argc, char **argv)
 
     // Allocate the CSR structure
     csr_array *csr;
+    int *node_value;
+    int *color;
 
-    // Parse graph file and store into a CSR format
-    if (file_format == 1)
-        csr = parseMetis(tmpchar, &num_nodes, &num_edges, directed);
-    else if (file_format == 0)
-        csr = parseCOO(tmpchar, &num_nodes, &num_edges, directed);
-    else {
-        printf("reserve for future");
-        exit(1);
-    }
+    if (use_mmap) {
+        use_color_mmap(&csr, &node_value, &color, &num_nodes, &num_edges);
+    } else {
+        // Parse graph file and store into a CSR format
+        if (file_format == 1)
+            csr = parseMetis(tmpchar, &num_nodes, &num_edges, directed);
+        else if (file_format == 0)
+            csr = parseCOO(tmpchar, &num_nodes, &num_edges, directed);
+        else {
+            printf("reserve for future");
+            exit(1);
+        }
 
-    // Allocate the vertex value array
-    int *node_value = (int *)malloc(num_nodes * sizeof(int));
-    if (!node_value) fprintf(stderr, "node_value malloc failed\n");
-    // Allocate the color array
-    int *color = (int *)malloc(num_nodes * sizeof(int));
-    if (!color) fprintf(stderr, "color malloc failed\n");
+        // Allocate the vertex value array
+        node_value = (int *)malloc(num_nodes * sizeof(int));
+        if (!node_value) fprintf(stderr, "node_value malloc failed\n");
+        // Allocate the color array
+        color = (int *)malloc(num_nodes * sizeof(int));
+        if (!color) fprintf(stderr, "color malloc failed\n");
 
-    // Initialize all the colors to -1
-    // Randomize the value for each vertex
-    for (int i = 0; i < num_nodes; i++) {
-        color[i] = -1;
-        node_value[i] = rand() % RANGE;
+        // Initialize all the colors to -1
+        // Randomize the value for each vertex
+        for (int i = 0; i < num_nodes; i++) {
+            color[i] = -1;
+            node_value[i] = rand() % RANGE;
+        }
+
+        if (create_mmap) {
+            create_color_mmap(csr, node_value, color, num_nodes, num_edges);
+            return 0;
+        }
     }
 
     int *row_d;
@@ -136,6 +213,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "ERROR: hipMalloc row_d (size:%d) => %s\n",  num_nodes , hipGetErrorString(err));
         return -1;
     }
+
     err = hipMalloc(&col_d, num_edges * sizeof(int));
     if (err != hipSuccess) {
         fprintf(stderr, "ERROR: hipMalloc col_d (size:%d): %s\n",  num_edges , hipGetErrorString(err));
@@ -155,11 +233,13 @@ int main(int argc, char **argv)
         fprintf(stderr, "ERROR: hipMalloc color_d (size:%d) => %s\n", num_nodes , hipGetErrorString(err));
         return -1;
     }
+
     err = hipMalloc(&node_value_d, num_nodes * sizeof(int));
     if (err != hipSuccess) {
         fprintf(stderr, "ERROR: hipMalloc node_value_d (size:%d) => %s\n", num_nodes , hipGetErrorString(err));
         return -1;
     }
+
     err = hipMalloc(&max_d, num_nodes * sizeof(int));
     if (err != hipSuccess) {
         fprintf(stderr, "ERROR: hipMalloc max_d (size:%d) => %s\n",  num_nodes , hipGetErrorString(err));
@@ -217,7 +297,6 @@ int main(int argc, char **argv)
 //    double timer3 = gettime();
 
     while (stop) {
-
         stop = 0;
 
         // Copy the termination variable to the device

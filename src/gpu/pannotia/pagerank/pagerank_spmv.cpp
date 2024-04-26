@@ -3,6 +3,7 @@
  * Copyright � 2014 Advanced Micro Devices, Inc.                                    *
  * Copyright (c) 2015 Mark D. Hill and David A. Wood                                *
  * Copyright (c) 2021 Gaurav Jain and Matthew D. Sinclair                           *
+ * Copyright (c) 2024 James Braun and Matthew D. Sinclair                           *
  * All rights reserved.                                                             *
  *                                                                                  *
  * Redistribution and use in source and binary forms, with or without               *
@@ -64,6 +65,12 @@
 #include "../graph_parser/parse.h"
 #include "../graph_parser/util.h"
 #include "kernel_spmv.h"
+#include <unistd.h>
+#include <sys/mman.h>
+#include <fstream>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #ifdef GEM5_FUSION
 #include <stdint.h>
@@ -77,36 +84,98 @@ void print_vectorf(float *vector, int num);
 
 int main(int argc, char **argv)
 {
-    char *tmpchar;
+    char *tmpchar = NULL;
 
     int num_nodes;
     int num_edges;
-    int file_format = 1;
+    int file_format = -1;
     bool directed = 0;
+    bool mode_set = false;
+    bool create_mmap = false;
+    bool use_mmap = false;
 
+    int opt;
     hipError_t err = hipSuccess;
 
-    if (argc == 3) {
-        tmpchar = argv[1]; // Graph inputfile
-        file_format = atoi(argv[2]);
-    } else {
-        fprintf(stderr, "You did something wrong!\n");
+    while ((opt = getopt(argc, argv, "f:hm:t:")) != -1) {
+        switch (opt) {
+        case 'f': // Input file name
+            tmpchar = optarg;
+            break;
+        case 'h': // Help
+            fprintf(stderr, "SWITCHES\n");
+            fprintf(stderr, "\t-f [file name]\n");
+            fprintf(stderr, "\t\tinput file name\n");
+            fprintf(stderr, "\t-m [mode]\n");
+            fprintf(stderr, "\t\toperation mode: default (run without mmap), generate, usemmap\n");
+            fprintf(stderr, "\t-t [file type]\n");
+            fprintf(stderr, "\t\tfile type (not required when running in usemmap mode): dimacs9 (0), metis (1), matrixmarket (2)\n");
+            exit(0);
+        case 'm':  // Mode
+            if (strcmp(optarg, "default") == 0 || optarg[0] == '0') {
+                mode_set = true;
+            } else if (strcmp(optarg, "generate") == 0 || optarg[0] == '1') {
+                create_mmap = true;
+            } else if (strcmp(optarg, "usemmap") == 0 || optarg[0] == '2') {
+                use_mmap = true;
+            } else {
+                fprintf(stderr, "Unrecognized mode: %s\n", optarg);
+                exit(1);
+            }
+            break;
+        case 't':  // Input file type
+            if (strcmp(optarg, "dimacs9") == 0 || optarg[0] == '0') {
+                file_format = 0;
+            } else if (strcmp(optarg, "metis") == 0 || optarg[0] == '1') {
+                file_format = 1;
+            } else if (strcmp(optarg, "matrixmarket") == 0 || optarg[0] == '2') {
+                file_format = 2;
+            } else {
+                fprintf(stderr, "Unrecognized file type: %s\n", optarg);
+                exit(1);
+            }
+            break;
+        default:
+            fprintf(stderr, "Unrecognized switch: -%c\n", opt);
+            exit(1);
+        }
+    }
+
+    if (!(mode_set || create_mmap || use_mmap)) {
+        fprintf(stderr, "Execution mode not specified! Use -h for help\n");
+        exit(1);
+    } else if (use_mmap && (tmpchar != NULL || file_format != -1)) {
+        fprintf(stdout, "Ignoring input file specifiers\n");
+    } else if ((mode_set || create_mmap) && tmpchar == NULL) {
+        fprintf(stderr, "Input file not specified! Use -h for help\n");
+        exit(1);
+    } else if ((mode_set || create_mmap) && file_format == -1) {
+        fprintf(stderr, "Input file type not specified! Use -h for help\n");
         exit(1);
     }
 
     // Allocate the csr structure
     csr_array *csr;
 
-    // Parse graph files into csr structure
-    if (file_format == 1) {
-       csr = parseMetis_transpose(tmpchar, &num_nodes, &num_edges, directed);
-    } else if (file_format == 0) {
-       csr = parseCOO_transpose(tmpchar, &num_nodes, &num_edges, directed);
+    if (use_mmap) {
+        use_pagerank_mmap(csr_array *csr, int *num_nodes, int *num_edges);
     } else {
-       printf("reserve for future");
-       exit(1);
-    }
+        // Parse graph files into csr structure
+        if (file_format == 1) {
+            csr = parseMetis_transpose(tmpchar, &num_nodes, &num_edges, directed);
+        } else if (file_format == 0) {
+            csr = parseCOO_transpose(tmpchar, &num_nodes, &num_edges, directed);
+        } else {
+            printf("reserve for future");
+            exit(1);
+        }
 
+        if (create_mmap) {
+            create_pagerank_mmap(csr_array *csr, int num_nodes, int num_edges);
+            return 0;
+        }
+    }
+    
     // Allocate rank_arrays
     float *pagerank_array = (float *)malloc(num_nodes * sizeof(float));
     if (!pagerank_array) fprintf(stderr, "malloc failed page_rank_array\n");
